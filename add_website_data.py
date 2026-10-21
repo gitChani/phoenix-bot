@@ -31,6 +31,14 @@ urls_to_scrape = [
     "https://www.fnx.co.il/claims-customer-service/"
 ]
 
+# האם עמודת metadata קיימת בטבלה (נוספת במיגרציה add_metadata_migration.sql)
+try:
+    supabase.table("documents").select("metadata").limit(1).execute()
+    HAS_METADATA = True
+except Exception:
+    HAS_METADATA = False
+print("שומר URL ב-metadata" if HAS_METADATA else "עמודת metadata לא קיימת - שומר ללא URL")
+
 print(f"מתחילים שאיבת נתונים מ-{len(urls_to_scrape)} עמודים באתר הפניקס...")
 
 for url in urls_to_scrape:
@@ -42,8 +50,15 @@ for url in urls_to_scrape:
         # סינון: שומר רק פסקאות שיש בהן תוכן ממשי (מעל 100 תווים)
         chunks = [chunk.strip() for chunk in text_content.split('\n\n') if len(chunk.strip()) > 100]
         
+        page_meta = getattr(scrape_result, 'metadata', None)
+        page_title = (page_meta.get('title') if isinstance(page_meta, dict) else getattr(page_meta, 'title', None)) or url
+
         print(f"נמצאו {len(chunks)} פסקאות מידע. שומר במסד הנתונים...")
-        
+
+        # מניעת כפילויות בהרצות חוזרות (אפשרי רק כשיש עמודת metadata)
+        if HAS_METADATA:
+            supabase.table("documents").delete().eq("metadata->>url", url).execute()
+
         for i, chunk in enumerate(chunks):
             try:
                 embed_response = gemini_client.models.embed_content(
@@ -52,10 +67,10 @@ for url in urls_to_scrape:
                 )
                 vector = embed_response.embeddings[0].values
                 
-                supabase.table("documents").insert({
-                    "content": chunk,
-                    "embedding": vector
-                }).execute()
+                row = {"content": chunk, "embedding": vector}
+                if HAS_METADATA:
+                    row["metadata"] = {"url": url, "title": page_title}
+                supabase.table("documents").insert(row).execute()
             except Exception as inner_e:
                 print(f"  - דילוג על מקטע (שגיאת שמירה): {inner_e}")
                 
