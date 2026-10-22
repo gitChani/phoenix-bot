@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 from dotenv import load_dotenv
@@ -19,6 +20,7 @@ GEMINI_DELAY = 0.05           # Tier 1: כמעט בלי השהיה (retry על 4
 GEMINI_RETRIES = 3
 MAX_DAILY_QUOTA = 10**9       # Tier 1: מבוטל בפועל
 MIN_CHUNK_CHARS = 100
+MAX_CHUNK_CHARS = 1500
 
 URLS_TO_CRAWL = [
     "https://www.fnx.co.il/car-insurance/",
@@ -46,8 +48,28 @@ def norm(url: str) -> str:
 
 
 def split_text_to_chunks(text: str) -> list:
-    # פסקאות עם תוכן ממשי בלבד (כמו ב-add_website_data.py)
-    return [c.strip() for c in text.split("\n\n") if len(c.strip()) > MIN_CHUNK_CHARS]
+    # פסקאות קצרות (כותרת, מספר טלפון, "התחלת שיחה") לא נזרקות אלא מצטרפות לפסקה הבאה עד שהקטע מגיע לאורך מינימלי.
+    # כותרות משנה (###) נשארות באותו קטע עם הכותרת שלפניהן (עד MAX_CHUNK_CHARS), כך שבלוק כמו "כל הדרכים לדבר איתנו" נשמר שלם עם כותרתו
+    text = re.sub(r"!\[[^\]]*\]\(<Base64-Image-Removed>\)(\\)*", "", text)
+    paras = [p.strip() for p in text.split("\n\n")]
+    paras = [p for p in paras if p and p not in ("-", "\\")]
+    chunks, buffer = [], []
+    for i, para in enumerate(paras):
+        buffer.append(para)
+        joined = "\n\n".join(buffer)
+        next_is_subsection = i + 1 < len(paras) and paras[i + 1].startswith("###")
+        # לא חותכים אחרי כותרת או אחרי פסקה קצרה: רצף פסקאות קצרות (כמו בלוק פרטי קשר) נשאר קטע אחד, ונסגר בפסקה ארוכה
+        hold = next_is_subsection or para.startswith("#") or len(para) <= MIN_CHUNK_CHARS
+        if len(joined) > MIN_CHUNK_CHARS and (not hold or len(joined) > MAX_CHUNK_CHARS):
+            chunks.append(joined)
+            buffer = []
+    if buffer:
+        leftover = "\n\n".join(buffer)
+        if chunks:
+            chunks[-1] += "\n\n" + leftover
+        elif len(leftover) > MIN_CHUNK_CHARS:
+            chunks.append(leftover)
+    return chunks
 
 
 def embed_with_retry(chunk: str):
