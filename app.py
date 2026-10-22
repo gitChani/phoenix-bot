@@ -346,6 +346,42 @@ def dedupe_docs(docs, limit=MATCH_COUNT):
     return result
 
 
+REWRITE_PROMPT = """You rewrite the customer's last message into one standalone Hebrew search query for an insurance website.
+Use the conversation only to resolve references (it, this, that, "and what about...", missing subject).
+If the last message is already self-contained, or starts a new topic, return it unchanged.
+Do not answer it, do not add facts, do not explain. Output only the query text.
+
+<conversation>
+{history}
+</conversation>
+
+<last_message>
+{question}
+</last_message>"""
+
+
+def standalone_question(history, question):
+    """משכתב שאלת המשך לשאלה עצמאית לצורך החיפוש במאגר ("אז זה בעצם לא יומי אלא לכמה ימים" -> "האם ביטוח יומי לרכב הוא ליום אחד או לכמה ימים?").
+    בכישלון (שגיאה, תשובה ריקה או ארוכה מדי) חוזרים לשאלה המקורית; האחראי לתשובה נשאר המודל הראשי, שרואה את ההיסטוריה המלאה."""
+    if not history:
+        return question
+    convo = "\n".join(
+        f'{"Customer" if m["role"] == "user" else "Pini"}: {m["content"][:400]}' for m in history
+    )
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=REWRITE_PROMPT.format(history=convo, question=question),
+            config=types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0), temperature=0),
+        )
+        rewritten = (response.text or "").strip().strip('"')
+        if rewritten and len(rewritten) <= max(300, len(question) * 4):
+            return rewritten
+    except Exception:
+        pass
+    return question
+
+
 def collect_sources(docs):
     """URLs ייחודיים מתוך ה-metadata של הקטעים שנמצאו, לפי סדר הרלוונטיות."""
     seen, result = set(), []
@@ -412,6 +448,10 @@ _GLOSSARY_RE = re.compile(
 )
 
 
+# אחרי המונח בא פועל הגדרה ("... הוא", "... היא", "... הינו", "... מוגדר כ", "... פירושו"), כלומר התשובה מסבירה אותו בעצמה
+_DEFINES_RE = re.compile(r"[\s*_]*(?:הוא|היא|הינו|הינה|הם|הן|מוגדר|מוגדרת|פירושו|פירושה)(?![\w])")
+
+
 def apply_glossary(text):
     """מחליף מונח מהמילון ב-span עם ההגדרה המלאה ב-data-def, שמוצגת בבועה בריחוף (ראו install_glossary_bubble).
     רק ההופעה הראשונה של כל מונח בתשובה מודגשת; הופעות נוספות נשארות טקסט רגיל. כינויים של אותו מונח (ריסק) נחשבים למונח אחד."""
@@ -421,6 +461,10 @@ def apply_glossary(text):
         prefix, term = match.group(1), match.group(2)
         definition = GLOSSARY[term]
         if definition in seen:
+            return match.group(0)
+        # התשובה עצמה כבר מגדירה את המונח ("ביטוח אובדן כושר עבודה הוא ביטוח ש..."): בועה נוספת רק תחזור על אותו הסבר
+        if _DEFINES_RE.match(match.string, match.end()):
+            seen.add(definition)
             return match.group(0)
         seen.add(definition)
         return f'{prefix}<span class="fnx-term-custom" data-def="{html.escape(definition, quote=True)}">{term}</span>'
@@ -768,11 +812,9 @@ if prompt := (suggested or chat_prompt):
                 with st.spinner("הבוט חושב..."):
                     # א. הפיכת השאלה לווקטור. שאלה נפוצה נענית ללא היסטוריה, כדי שהתשובה תהיה אחידה וניתנת לשמירה
                     history = [] if is_faq else st.session_state.messages[:-1][-HISTORY_MESSAGES:]
-                    previous_questions = [m["content"] for m in history if m["role"] == "user"]
-                    # שאלה קצרה היא כנראה שאלת המשך: מצרפים את השאלה הקודמת לחיפוש הווקטורי
-                    search_text = prompt
-                    if previous_questions and len(prompt.split()) < 6:
-                        search_text = f"{previous_questions[-1]} {prompt}"
+                    # שאלת המשך ("אז זה בעצם לא יומי אלא לכמה ימים") מנוסחת מחדש כשאלה עצמאית לפני החיפוש, בכל אורך;
+                    # אחרת החיפוש לא מוצא את הנושא והבוט מסרב. בלי היסטוריה (שאלה ראשונה, שאלה נפוצה) אין שכתוב ואין עלות
+                    search_text = standalone_question(history, prompt)
 
                     embed_response = gemini_client.models.embed_content(
                         model="gemini-embedding-2",
