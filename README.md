@@ -2,6 +2,8 @@
 
 An end-to-end Retrieval-Augmented Generation (RAG) web assistant in Hebrew built for **The Phoenix** (`fnx.co.il`), developed during an Open Code AI Hackathon. Pini answers customer questions strictly grounded in official website content, streams responses in real time, caches frequent answers, and provides contextual insurance & savings glossary tooltips.
 
+**Live Demo:** https://phoenix-bot-cnwba6ntz228n4smyrewvh.streamlit.app/
+
 ---
 
 ## Key Features
